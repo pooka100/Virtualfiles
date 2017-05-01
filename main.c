@@ -65,27 +65,23 @@ int main(int argc, char **argv)
 	readbuf_free(test);*/
 
 	
-	netserverinit("127.0.0.1");
-	int test = netopen("restfile.txt", O_RDWR);
-	printf("%d\n", test);
+	netserverinit("kill.cs.rutgers.edu", M_UNRESTRICTED);
+	int test = netopen("restfile.txt", O_WRONLY);
 
+	sleep(10);
+	printf("TESTNUM: %d\n", test);
 	char *gasgasgas = (char *)malloc(11);
-	printf("%ld\n", (long)gasgasgas);
 	gasgasgas[9] = '\0';
 	netread(test, gasgasgas, 10);
 	
 	gasgasgas[10] = '\0';
-	printf("%s\n", gasgasgas);
 	
-
-	printf("%ld\n", (long)gasgasgas);
+	printf("%s\n", gasgasgas);
 	netwrite(test, gasgasgas, 10);
-	printf("%ld\n", (long)gasgasgas);
 	free(gasgasgas);
 	test = netclose(test);
-	printf("%d\n", test);
 	close(test);
-	
+
 
 
 	return 0;

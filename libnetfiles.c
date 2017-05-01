@@ -5,13 +5,30 @@
 /* Should be long enough for any address */
 static char *host_name;
 static char *port      = "12002";
+static int MODE;
 
 int itoa(int total, char *string)
 {
+
+	if(total == 0)
+	{
+		string[0] = '0';
+		return 1;
+	}
+	
+	int real = total;
+	int i = 0;
 	int len = 0;
-	int i;
+	if(total < 0)
+	{
+		total = -(total);
+		++len;
+		++i;
+	}
+
 	int mult = 1;
 	int tmp = total;
+
 	/*got the length*/
 	while(total > 0)
 	{
@@ -21,13 +38,16 @@ int itoa(int total, char *string)
 	}
 	total = tmp;
 	mult /= 10;
-	for(i = 0; i < len; ++i)
+	for(; i < len; ++i)
 	{
 		
 		string[i] = ((total / mult) % 10) + 48;
 		mult /= 10;
 	}
 
+
+	if(real < 0)
+		string[0] = '-';
 	string[len] = '\0';
 	return len;
 }
@@ -195,11 +215,11 @@ ssize_t netopen(const char *pathname, int flags)
 	
 
 	/* Protocol is: size \n Open \n filename \n flags \n \0 */
-	size_data = 5 + strlen(pathname) + 1 + itoa(flags, tmp) + 2 + 1; 
+	size_data = 5 + strlen(pathname) + 1 + itoa(flags, tmp) + 2 + 1 + 2; 
 	size_total = size_data + itoa(size_data, tmp);
 	dataoutput = (char *)malloc(sizeof(char) * size_total);
 
-	sprintf(dataoutput, "%d\n%s\n%s\n%d\n", size_data, "Open", pathname, flags);
+	sprintf(dataoutput, "%d\n%s\n%s\n%d\n%d\n", size_data, "Open", pathname, flags, MODE);
 	/* Writes the protocol for open */
 
 	serv_writen(connectedfd, dataoutput, size_total);	
@@ -231,7 +251,7 @@ ssize_t netopen(const char *pathname, int flags)
 
 	readbuf_free(buf);
 	free(tmp);
-	returnfd = -(atoi(dataoutput));
+	returnfd = -(atoi(dataoutput)) - 10;
 	free(dataoutput);
 	return returnfd;
 
@@ -263,11 +283,12 @@ ssize_t netclose(int fd)
 	
 
 	/* Protocol is: size \n Close \n FD \n \0 */
-	size_data = 6 + 1 + itoa(fd, tmp) + 2 + 1; 
+	size_data = 6 + 1 + itoa(-(fd) - 10, tmp) + 2 + 1 + 2; 
 	size_total = size_data + itoa(size_data, tmp);
 	dataoutput = (char *)malloc(sizeof(char) * size_total);
 
-	sprintf(dataoutput, "%d\n%s\n%d\n", size_data, "Close", -(fd));
+	printf("%d\n", -(fd) - 10);
+	sprintf(dataoutput, "%d\n%s\n%d\n%d\n", size_data, "Close", -(fd) - 10, MODE);
 	/* Writes the protocol for open */
 
 	serv_writen(connectedfd, dataoutput, size_total);	
@@ -337,12 +358,12 @@ ssize_t netread(int fd, void *data, size_t nbyte)
 	
 
 	/* Protocol is: size \n Read \n FD \n bytes to read \n \0 */
-	size_data = 5 + itoa(fd, tmp) + 1 + 2 + itoa(nbyte, tmp2) + 1 + 1;
+	size_data = 5 + itoa(-(fd) - 10, tmp) + 1 + 2 + itoa(nbyte, tmp2) + 1 + 1;
 	size_total = size_data + itoa(size_data, tmp);
 
 	dataoutput = (char *)malloc(sizeof(char) * size_total);
 
-	sprintf(dataoutput, "%d\n%s\n%d\n%d\n", size_data, "Read", -(fd), (int)nbyte);
+	sprintf(dataoutput, "%d\n%s\n%d\n%d\n", size_data, "Read", -(fd) - 10, (int)nbyte);
 	/* Writes the protocol for open */
 
 	serv_writen(connectedfd, dataoutput, size_total);	
@@ -424,13 +445,13 @@ ssize_t netwrite(int fildes, const void *data, size_t nbyte)
 	
 
 	/* Protocol is: size \n Write \n FD \n bytes to read \n data \n \0 */
-	size_data = 6 + itoa(fildes, tmp) + 1 + itoa(nbyte, tmp2) + 1 + 2 + nbyte + 2;
+	size_data = 6 + itoa(-(fildes) - 10, tmp) + 1 + itoa(nbyte, tmp2) + 1 + 2 + nbyte + 2;
 	size_total = size_data + itoa(size_data, tmp);
 
 	dataoutput = (char *)malloc(sizeof(char) * size_total);
 
 	printf("dout: %ld\n", (long)dataoutput);
-	sprintf(dataoutput, "%d\n%s\n%d\n%d\n%s\n", size_data, "Write", -(fildes), (int)nbyte, (const char *)data);
+	sprintf(dataoutput, "%d\n%s\n%d\n%d\n%s\n", size_data, "Write", -(fildes) - 10, (int)nbyte, (const char *)data);
 	/* Writes the protocol for open */
 
 	serv_writen(connectedfd, dataoutput, size_total);	
@@ -478,10 +499,8 @@ ssize_t netwrite(int fildes, const void *data, size_t nbyte)
 }
 
 
-ssize_t netserverinit(char *hostname)
+ssize_t netserverinit(char *hostname, int filemode)
 {
-	//host_name = (char *)malloc(sizeof(char) * 10);
-	//strcpy(host_name, "127.0.0.1");
 	int fdgood = newclientfd(hostname, _PORT_, 0);		
 
 	if(fdgood == -1)
@@ -490,11 +509,14 @@ ssize_t netserverinit(char *hostname)
 		return -1;
 	}
 
-	host_name = hostname;
+	host_name = (char *)malloc(strlen(hostname) + 1);
+	strcpy(host_name, hostname);
+	//host_name = hostname;
 	
 	serv_writen(fdgood, "4\n0", 4);
 	close(fdgood);	
+	if(filemode > 3 || filemode < 0)
+		return -1;
+	MODE = filemode;
 	return 0;
-
-
 }

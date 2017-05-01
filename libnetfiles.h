@@ -15,6 +15,10 @@
 
 #define BUFSIZE 128
 #define _PORT_ "12002"
+
+#define M_UNRESTRICTED 0
+#define M_EXCLUSIVE    1
+#define M_TRANSACTION  2
 typedef struct readbuf
 {
 	char *data;
@@ -32,7 +36,7 @@ void *readbuf_init(int fd);
 void readbuf_free(readbuf *buf);
 
 /* Main functions for execution */
-ssize_t netserverinit(char * hostname);
+ssize_t netserverinit(char *hostname, int filemode);
 
 ssize_t netopen(const char *pathname, int flags);
 ssize_t netread(int fd, void *data, size_t nbyte);

@@ -17,6 +17,9 @@
 
 #define LOCK(X) sem_wait(X)
 #define UNLOCK(X)    sem_post(X)
+#define M_UNRESTRICTED 0
+#define M_EXCLUSIVE    1
+#define M_TRANSACTION  2
 
 /* SIMPLE STUPID PROTOCOL 
  * 
@@ -26,7 +29,9 @@
  * Text
 */
 sem_t mutex;
+sem_t mutex2;
 sigset_t mask;
+
 
 int *tmpconnfd = NULL;
 
@@ -40,6 +45,62 @@ typedef struct readbuf
 	ssize_t maxread;
 } readbuf;
 
+typedef struct descriptordata
+{
+	char *name;
+	int protection;
+} ddata;
+
+typedef struct filedata
+{
+	struct filedata *next;
+	struct filedata *prev;
+	char *name;
+	int numread;
+	int numwrite;
+	int nummodes[3];
+	/* 0 = unrestricted, 1 = exclusive, 2 = transaction */
+} filedata;
+
+filedata *_filedata_ = NULL;
+ddata *fds[1024];
+
+/* Creates a new item and puts it at the front of the filedata llist */
+filedata *filedata_init(char *name, int flag)
+{
+	filedata *newfiledata = (filedata *)malloc(sizeof(filedata));
+	newfiledata->next = _filedata_;
+	newfiledata->prev = NULL;
+	if(_filedata_)
+		newfiledata->next->prev = newfiledata;
+
+	_filedata_ = newfiledata;
+	newfiledata->name = (char *)malloc(strlen(name) + 1);
+	strcpy(newfiledata->name, name);
+	newfiledata->numread = 0;
+	newfiledata->numwrite = 0;
+	printf("FLAG: %d\n", flag);
+	switch (flag)
+	{
+		case O_RDONLY:
+			++(newfiledata->numread);
+			break;
+		case O_WRONLY:
+			++(newfiledata->numwrite);
+			break;
+		case O_RDWR:
+			++(newfiledata->numread);
+			++(newfiledata->numwrite);
+			break;
+		default:
+			break;
+	}
+	newfiledata->nummodes[0] = 0;
+	newfiledata->nummodes[1] = 0;
+	newfiledata->nummodes[2] = 0;
+	return newfiledata;
+	
+}
 void *readbuf_init(int fd)
 {
 	readbuf *buf = (readbuf *)malloc(sizeof(readbuf));
@@ -51,6 +112,7 @@ void *readbuf_init(int fd)
 }
 
 
+
 void cleanexit(int sig)
 {
 	if(tmpconnfd != NULL)
@@ -59,10 +121,26 @@ void cleanexit(int sig)
 }
 int itoa(int total, char *string)
 {
+
+	if(total == 0)
+	{
+		string[0] = '0';
+		return 1;
+	}
+	
+	int real = total;
+	int i = 0;
 	int len = 0;
-	int i;
+	if(total < 0)
+	{
+		total = -(total);
+		++len;
+		++i;
+	}
+
 	int mult = 1;
 	int tmp = total;
+
 	/*got the length*/
 	while(total > 0)
 	{
@@ -72,13 +150,16 @@ int itoa(int total, char *string)
 	}
 	total = tmp;
 	mult /= 10;
-	for(i = 0; i < len; ++i)
+	for(; i < len; ++i)
 	{
 		
 		string[i] = ((total / mult) % 10) + 48;
 		mult /= 10;
 	}
 
+
+	if(real < 0)
+		string[0] = '-';
 	string[len] = '\0';
 	return len;
 }
@@ -255,6 +336,179 @@ void serv_client_error(int connfd)
 	serv_writen(connfd, "USERERROR\n", sizeof(char) * 10);
 }
 
+int serv_mode_check(char *name, int flags, char *mode)
+{
+	/* have to mutex because filedata might be deleted while this is still being checked */
+	int found = 0;
+	filedata *tmpdata = _filedata_;
+	
+	if((atoi(mode) > 2) || (atoi(mode) < 0))
+		return -1;
+
+	if(tmpdata == NULL)
+	{
+		tmpdata = filedata_init(name, flags);
+		++(tmpdata->nummodes[atoi(mode)]);
+		return 0;
+	}
+
+	while(tmpdata->next != NULL)
+	{
+		if(strcmp(tmpdata->name, name) == 0)
+		{
+			found = 1;
+			break;
+		}
+		tmpdata = tmpdata->next;
+	}
+
+	printf("name1: %s size: %d\n",name, strlen(name));
+	printf("name2: %s size: %d\n", tmpdata->name, strlen(tmpdata->name));
+	if(strcmp(tmpdata->name, name) == 0)
+		found = 1;
+
+	if(!found)
+	{
+		tmpdata = filedata_init(name, flags);
+		++(tmpdata->nummodes[atoi(mode)]);
+		return 0;
+	}
+
+	/* made it through the trial of hell restrictions */
+	if(flags == O_RDONLY)
+		++(tmpdata->numread);
+	else if(flags == O_WRONLY)
+		++(tmpdata->numwrite);
+	else if(flags == O_RDWR)
+	{
+		++(tmpdata->numread);
+		++(tmpdata->numwrite);
+	}
+
+	++(tmpdata->nummodes[atoi(mode)]);
+
+	return 0;
+}
+
+int serv_check_openable(char *name, int flags, char *mode)
+{
+	int found = 0;
+	filedata *tmpdata = _filedata_;
+	if(tmpdata == NULL)
+		return 0;
+	
+	while(tmpdata->next != NULL)
+	{
+		if(strcmp(tmpdata->name, name) == 0)
+		{
+			found = 1;
+			break;
+		}
+		tmpdata = tmpdata->next;
+	}
+
+	if(strcmp(tmpdata->name, name) == 0)
+		found = 1;
+
+	if(!found)
+	{
+		return 0;
+	}
+
+
+	if(tmpdata->nummodes[1] && !(tmpdata->nummodes[2]))
+	{
+		if((tmpdata->numwrite != 0) && ((flags == O_WRONLY) || (flags == O_RDWR)))
+			return -1;
+		else if((tmpdata->numwrite != 0) && (atoi(mode) == M_TRANSACTION))
+			return -1;
+		else if((tmpdata->numread != 0) && (atoi(mode) == M_TRANSACTION))
+			return -1;
+
+	}
+	/* If it even exists currently, you can't do nothing */
+	else if(tmpdata->nummodes[2])
+	{
+		return -1;
+	}
+	else if(!(tmpdata->nummodes[1]))
+	{
+		/* if there is someone already reading or writing and incoming transaction */
+		if(((tmpdata->numread != 0) || (tmpdata->numwrite != 0)) && (atoi(mode) == M_TRANSACTION))
+			return -1;
+		/* if there is someone already writing and incoming exclusive */
+		if((tmpdata->numwrite != 0) && (atoi(mode) == M_EXCLUSIVE) && ((flags == O_RDWR) || (flags == O_WRONLY)))
+			return -1;
+	}
+	return 0;
+}
+
+int serv_mode_free(int fd, char *mode)
+{		
+	int found = 0;
+	int flag = (fds[fd])->protection;
+	char *name = (fds[fd])->name;
+	filedata *tmpdata = _filedata_;
+
+	if((tmpdata == NULL)|| (name == NULL))
+		return -1;
+
+	while(tmpdata->next != NULL)
+	{
+		if(strcmp(tmpdata->name, name) == 0)
+		{
+			found = 1;
+			break;
+		}
+		tmpdata = tmpdata->next;
+	}
+
+	if(strcmp(tmpdata->name, name) == 0)
+		found = 1;
+
+	if(!found)
+		return -1;
+
+	--(tmpdata->nummodes[atoi(mode)]);
+
+	if(flag == O_RDONLY)
+		--(tmpdata->numread);
+	else if(flag == O_WRONLY)
+		--(tmpdata->numwrite);
+	else if(flag == O_RDWR)
+	{
+		--(tmpdata->numread);
+		--(tmpdata->numwrite);
+	}
+	/* delete file from the list */
+	if((tmpdata->numread == 0) && (tmpdata->numwrite == 0))
+	{
+
+		if(!(tmpdata->prev) && !(tmpdata->next))
+			_filedata_ = NULL;
+		else if(!(tmpdata->prev))
+		{
+			tmpdata->next->prev = NULL;
+			_filedata_ = tmpdata->next;
+		}
+		else if(!(tmpdata->next))
+			tmpdata->prev->next = NULL;
+		else
+		{
+			tmpdata->prev->next = tmpdata->next;
+			tmpdata->next->prev = tmpdata->prev;
+		}
+		
+		free(tmpdata->name);
+		free(tmpdata);
+
+			
+	}
+	return 0;
+
+}
+
+
 /* Have to block for file operations because of errno */
 int blockedcall(int connfd, char *param1, int param2, char *param3, enum fileop operation)
 {
@@ -264,11 +518,40 @@ int blockedcall(int connfd, char *param1, int param2, char *param3, enum fileop 
 	LOCK(&mutex);	
 	switch (operation)
 	{
+		/* MODE IS THIRD PARAM */
 		case OPOPEN:
+			//misc = serv_mode_check(param1, param2, param3);
+			misc = serv_check_openable(param1, param2, param3);
+			if(misc == -1)
+			{
+				UNLOCK(&mutex);
+				serv_error(EACCES , connfd);
+				return -1;
+			}
+			printf("BEFORE OPEN\n");
+			printf("%s %d %s\n", param1, param2, param3);
 			misc = open(param1, param2);
+			printf("AFTER OPEN\n");
+
+			if(misc != -1)
+			{
+				serv_mode_check(param1, param2, param3);
+				fds[misc] = (ddata *)malloc(sizeof(ddata));
+				(fds[misc])->name = (char *)malloc(strlen(param1) + 1);
+				strcpy((fds[misc])->name, param1);
+				(fds[misc])->protection = param2;
+			}
 			break;
+		/* USING PARAM 3 AS MODE */
 		case OPCLOSE:
 			misc = close(param2);
+			if(misc != -1)
+			{
+				serv_mode_free(param2, param3);
+				free(fds[param2]->name);
+				free(fds[param2]);
+				fds[param2] = NULL;
+			}
 			break;
 		case OPREAD:
 			tmp = (char *)malloc(sizeof(char) * atoi(param1));
@@ -323,7 +606,7 @@ void serv_open(int connfd, char *lines, int size, readbuf *buf)
 {
 	int charsread, fakefd;
 	char *writebuf = (char *)malloc(sizeof(char *) * 64);
-	char *name, *flags;
+	char *name, *flags, *mode;
 
 	/* next line should be name */
 	if((charsread = serv_readln(connfd, lines, size, buf)) == -1)
@@ -353,9 +636,24 @@ void serv_open(int connfd, char *lines, int size, readbuf *buf)
 	}
 
 	flags = lines;
+	lines = ((char *)lines) + charsread;
 	/* MAKE SURE TO ADD A \n AT THE END OF SENDING MESSAGE FROM CLIENT */
 
-	if((fakefd = blockedcall(connfd, name, atoi(flags), NULL, OPOPEN)) == -1)
+	if((charsread = serv_readln(connfd, lines, size, buf)) == -1)
+	{
+		serv_client_error(connfd);
+		return;
+	}
+	else if(charsread == 0)
+	{
+		serv_client_error(connfd);
+		return;
+	}
+
+	mode = lines;
+
+
+	if((fakefd = blockedcall(connfd, name, atoi(flags), mode, OPOPEN)) == -1)
 	{
 		free(writebuf);
 		return;
@@ -381,7 +679,7 @@ void serv_close(int connfd, char *lines, int size, readbuf *buf)
 {
 	int charsread;
 	char *writebuf = (char *)malloc(sizeof(char *) * 64);
-	char *fd_char;
+	char *fd_char, *mode;
 
 	/* next line should be fd */
 
@@ -399,7 +697,19 @@ void serv_close(int connfd, char *lines, int size, readbuf *buf)
 	fd_char = lines;
 	lines = ((char *)lines) + charsread;
 
-	if(blockedcall(connfd, NULL, atoi(fd_char), NULL, OPCLOSE) == -1)
+	if((charsread = serv_readln(connfd, lines, size, buf)) == -1)
+	{
+		serv_client_error(connfd);
+		return;
+	}
+	else if(charsread == 0)
+	{
+		serv_client_error(connfd);
+		return;
+	}
+	mode = lines;
+	
+	if(blockedcall(connfd, NULL, atoi(fd_char), mode, OPCLOSE) == -1)
 	{
 		free(writebuf);
 		return;
@@ -596,11 +906,15 @@ int main(int argc, char **argv)
 	struct sockaddr_storage addr;
 	socklen_t addr_len;
 	pthread_t tid;
-	int listenfd;
+	int listenfd, i;
 
 
 	listenfd = newlistenerfd();
 	sem_init(&mutex, 0, 1);
+	sem_init(&mutex2, 0, 1);
+
+	for(i = 0; i < 1024; ++i)
+		fds[i] = NULL;
 	
 	/* Dont want to overuse mutex so creating SIGPIPE block here, should not be concerned */
 	sigemptyset(&mask);
